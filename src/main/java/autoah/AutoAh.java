@@ -6,9 +6,13 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.screen.ingame.GenericContainerScreen;
+import net.minecraft.client.gui.widget.ButtonWidget;
+import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
+import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.screen.GenericContainerScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.LiteralText;
@@ -33,11 +37,14 @@ public class AutoAh implements ClientModInitializer {
     }
 
     static Cfg cfg = new Cfg();
+    static boolean cfgLoaded = false;
     static boolean running = false;
     static final Deque<Step> queue = new ArrayDeque<>();
     static KeyBinding toggleKey;
+    static KeyBinding guiKey;
     static final Random rnd = new Random();
 
+    // ---------- Плавна мишка ----------
     static boolean moving = false;
     static double sx, sy, tx, ty, bend;
     static long t0;
@@ -66,6 +73,7 @@ public class AutoAh implements ClientModInitializer {
         if (t >= 1.0) moving = false;
     }
 
+    // ---------- Кроки ----------
     interface Step { boolean tick(MinecraftClient mc); }
 
     static class Wait implements Step {
@@ -161,30 +169,169 @@ public class AutoAh implements ClientModInitializer {
         queue.add(mc -> { buildCycle(); return true; });
     }
 
+    // ---------- Конфіг ----------
+    static File cfgFile() {
+        return new File(MinecraftClient.getInstance().runDirectory, "config/autoah.json");
+    }
+
     static void loadCfg() {
-        File f = new File(MinecraftClient.getInstance().runDirectory, "config/autoah.json");
-        Gson g = new GsonBuilder().setPrettyPrinting().create();
+        if (cfgLoaded) return;
+        cfgLoaded = true;
         try {
-            if (f.exists()) cfg = g.fromJson(new String(Files.readAllBytes(f.toPath()), "UTF-8"), Cfg.class);
-            else { f.getParentFile().mkdirs(); Files.write(f.toPath(), g.toJson(cfg).getBytes("UTF-8")); }
+            File f = cfgFile();
+            if (f.exists()) {
+                Cfg c = new Gson().fromJson(new String(Files.readAllBytes(f.toPath()), "UTF-8"), Cfg.class);
+                if (c != null) cfg = c;
+            }
         } catch (Exception e) { e.printStackTrace(); }
     }
 
+    static void saveCfg() {
+        try {
+            File f = cfgFile();
+            f.getParentFile().mkdirs();
+            Files.write(f.toPath(), new GsonBuilder().setPrettyPrinting().create().toJson(cfg).getBytes("UTF-8"));
+        } catch (Exception e) { e.printStackTrace(); }
+    }
+
+    static void setRunning(MinecraftClient mc, boolean on) {
+        running = on;
+        queue.clear();
+        moving = false;
+        if (on) buildCycle();
+        if (mc.player != null)
+            mc.player.sendMessage(new LiteralText("[AutoAH] " + (on ? "ON" : "OFF")), true);
+    }
+
+    // ---------- Вікно налаштувань ----------
+    static class CfgScreen extends Screen {
+        TextFieldWidget fPrice, fCount, fTimer, fCmd, fLots, fCancel, fMove;
+        ButtonWidget bSlot, bStart;
+        int hotSlot;
+
+        CfgScreen() { super(new LiteralText("AutoAH")); }
+
+        static int num(String s, int def) {
+            try { return Integer.parseInt(s.trim()); } catch (Exception e) { return def; }
+        }
+
+        TextFieldWidget field(int y, String value, int max) {
+            TextFieldWidget f = new TextFieldWidget(this.textRenderer, this.width / 2 - 20, y, 150, 18, new LiteralText(""));
+            f.setMaxLength(max);
+            f.setText(value);
+            this.addButton(f);
+            return f;
+        }
+
+        String slotLabel() {
+            String name = "";
+            if (this.client != null && this.client.player != null) {
+                name = this.client.player.inventory.getStack(hotSlot - 1).getName().getString();
+            }
+            return "Slot " + hotSlot + ": " + name;
+        }
+
+        @Override
+        protected void init() {
+            loadCfg();
+            hotSlot = Math.max(1, Math.min(9, cfg.hotbarSlot));
+            int y = 30;
+            fPrice = field(y, cfg.price, 20); y += 24;
+            fCount = field(y, String.valueOf(cfg.count), 6); y += 24;
+            fTimer = field(y, String.valueOf(cfg.timerSeconds), 6); y += 24;
+            fCmd = field(y, cfg.sellCommand, 60); y += 24;
+            fLots = field(y, String.valueOf(cfg.myLotsSlot), 4); y += 24;
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < cfg.cancelSlots.length; i++) {
+                if (i > 0) sb.append(",");
+                sb.append(cfg.cancelSlots[i]);
+            }
+            fCancel = field(y, sb.toString(), 60); y += 24;
+            fMove = field(y, String.valueOf(cfg.moveMs), 5); y += 24;
+
+            bSlot = this.addButton(new ButtonWidget(this.width / 2 - 20, y, 150, 20, new LiteralText(slotLabel()), b -> {
+                hotSlot = hotSlot % 9 + 1;
+                b.setMessage(new LiteralText(slotLabel()));
+            }));
+            y += 30;
+
+            this.addButton(new ButtonWidget(this.width / 2 - 155, y, 100, 20, new LiteralText("Zberehty"), b -> {
+                apply();
+                saveCfg();
+            }));
+            bStart = this.addButton(new ButtonWidget(this.width / 2 - 50, y, 100, 20,
+                    new LiteralText(running ? "Zupynyty" : "Start"), b -> {
+                apply();
+                saveCfg();
+                setRunning(this.client, !running);
+                this.client.openScreen(null);
+            }));
+            this.addButton(new ButtonWidget(this.width / 2 + 55, y, 100, 20, new LiteralText("Zakryty"), b -> {
+                apply();
+                saveCfg();
+                this.client.openScreen(null);
+            }));
+        }
+
+        void apply() {
+            cfg.price = fPrice.getText().trim();
+            cfg.count = Math.max(1, num(fCount.getText(), 64));
+            cfg.timerSeconds = Math.max(1, num(fTimer.getText(), 300));
+            cfg.sellCommand = fCmd.getText().trim();
+            cfg.myLotsSlot = Math.max(0, num(fLots.getText(), 49));
+            cfg.moveMs = Math.max(100, num(fMove.getText(), 450));
+            cfg.hotbarSlot = hotSlot;
+            List<Integer> list = new ArrayList<>();
+            for (String p : fCancel.getText().split(",")) {
+                try { list.add(Integer.parseInt(p.trim())); } catch (Exception ignored) { }
+            }
+            int[] arr = new int[list.size()];
+            for (int i = 0; i < arr.length; i++) arr[i] = list.get(i);
+            cfg.cancelSlots = arr;
+        }
+
+        @Override
+        public void tick() {
+            fPrice.tick(); fCount.tick(); fTimer.tick(); fCmd.tick();
+            fLots.tick(); fCancel.tick(); fMove.tick();
+        }
+
+        @Override
+        public void render(MatrixStack m, int mx, int my, float d) {
+            this.renderBackground(m);
+            drawCenteredText(m, this.textRenderer, new LiteralText("AutoAH - nalashtuvannia"), this.width / 2, 10, 0xFFFFFF);
+            int lx = this.width / 2 - 170;
+            int y = 35;
+            String[] labels = {"Tsina", "Kilkist", "Taimer (sek)", "Komanda prodazhu",
+                    "Slot 'moi loty'", "Slotu na znyattia", "Shvydkist myshky (ms)", "Predmet (hotbar)"};
+            for (int i = 0; i < labels.length; i++) {
+                this.textRenderer.drawWithShadow(m, labels[i], lx, y + i * 24, 0xAAAAAA);
+            }
+            super.render(m, mx, my, d);
+        }
+
+        @Override
+        public boolean isPauseScreen() { return false; }
+    }
+
+    // ---------- Ініціалізація ----------
     @Override
     public void onInitializeClient() {
         toggleKey = KeyBindingHelper.registerKeyBinding(
-                new KeyBinding("AutoAH toggle", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_R, "AutoAH"));
+                new KeyBinding("AutoAH start/stop", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_R, "AutoAH"));
+        guiKey = KeyBindingHelper.registerKeyBinding(
+                new KeyBinding("AutoAH menu", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_G, "AutoAH"));
 
         ScreenEvents.AFTER_INIT.register((mc, screen, w, h) ->
                 ScreenEvents.afterRender(screen).register((s, m, mx, my, d) -> frame()));
 
         ClientTickEvents.END_CLIENT_TICK.register(mc -> {
             while (toggleKey.wasPressed()) {
-                running = !running;
-                queue.clear(); moving = false;
-                if (running) { loadCfg(); buildCycle(); }
-                if (mc.player != null)
-                    mc.player.sendMessage(new LiteralText("[AutoAH] " + (running ? "ON" : "OFF")), true);
+                loadCfg();
+                setRunning(mc, !running);
+            }
+            while (guiKey.wasPressed()) {
+                if (mc.currentScreen == null) mc.openScreen(new CfgScreen());
             }
             if (!running || mc.player == null) return;
             Step s = queue.peek();
