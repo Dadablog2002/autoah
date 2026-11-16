@@ -7,7 +7,6 @@ import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ingame.GenericContainerScreen;
-import net.minecraft.client.options.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.screen.GenericContainerScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
@@ -35,7 +34,7 @@ public class AutoAh implements ClientModInitializer {
     static Cfg cfg = new Cfg();
     static boolean running = false;
     static final Deque<Step> queue = new ArrayDeque<>();
-    static KeyBinding toggleKey;
+    static net.minecraft.client.options.KeyBinding toggleKey;
     static final Random rnd = new Random();
 
     static boolean moving = false;
