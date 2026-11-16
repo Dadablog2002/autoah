@@ -3,7 +3,11 @@
   "id": "autoah",
   "version": "1.0",
   "name": "AutoAH",
+  "description": "Auto sell on /ah",
   "environment": "client",
-  "entrypoints": { "client": ["autoah.AutoAh"] },
+  "entrypoints": {
+    "client": ["autoah.AutoAh"],
+    "modmenu": ["autoah.ModMenuIntegration"]
+  },
   "depends": { "fabricloader": "*", "fabric": "*", "minecraft": "1.16.5" }
 }
