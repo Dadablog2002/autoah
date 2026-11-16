@@ -24,6 +24,7 @@ import net.minecraft.client.util.InputUtil;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.nbt.NbtCompound;
 import net.minecraft.network.packet.c2s.play.ClickSlotC2SPacket;
 import net.minecraft.screen.GenericContainerScreenHandler;
 import net.minecraft.screen.slot.Slot;
@@ -133,8 +134,26 @@ public class AutoAh implements ClientModInitializer {
     }
 
     // ---------------------------------------------------------------- інвентар
+    /** Ключі NBT, які реально визначають "який це предмет". Решта (лор, мітки плагінів аукціону) ігнорується. */
+    static final String[] KEY_TAGS = {"Potion", "CustomPotionEffects", "CustomPotionColor", "Enchantments",
+            "StoredEnchantments", "Damage", "SkullOwner"};
+
     static boolean same(ItemStack a, ItemStack b) {
-        return a.getItem() == b.getItem() && Objects.equals(a.getTag(), b.getTag());
+        if (a.getItem() != b.getItem()) {
+            return false;
+        }
+        NbtCompound ca = a.getTag();
+        NbtCompound cb = b.getTag();
+        if (Objects.equals(ca, cb)) {
+            return true;
+        }
+        // аукціон міг додати/змінити службові теги при поверненні предмета — порівнюємо тільки суттєві
+        for (String k : KEY_TAGS) {
+            if (!Objects.equals(ca == null ? null : ca.get(k), cb == null ? null : cb.get(k))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Індекс у інвентарі (0-8 хотбар, 9-35 інвентар) -> номер слота у вікні гравця. */
@@ -234,11 +253,35 @@ public class AutoAh implements ClientModInitializer {
         message(mc, text);
     }
 
+    static int emptyRetries = 0;
+
     static void buildRound(MinecraftClient mc) {
         if (findSrc(mc) < 0) {
-            finish(mc, "Готово. Більше немає предметів для продажу.");
+            // предмети після скасування лотів можуть повертатися з затримкою — трохи чекаємо
+            if (emptyRetries++ < 6) {
+                queue.add(new Wait(20));
+                queue.add(m -> {
+                    buildRound(m);
+                    return true;
+                });
+                return;
+            }
+            emptyRetries = 0;
+            int other = 0;
+            for (int i = 0; i < 36; ++i) {
+                ItemStack s = mc.player.inventory.getStack(i);
+                if (!s.isEmpty() && s.getItem() == sellStack.getItem()) {
+                    other += s.getCount();
+                }
+            }
+            if (other > 0) {
+                finish(mc, "Знайшла " + other + " шт. такого ж предмета, але з іншими даними (NBT). Зупинено.");
+            } else {
+                finish(mc, "Готово. Більше немає предметів для продажу.");
+            }
             return;
         }
+        emptyRetries = 0;
         noMore = false;
         for (int i = 0; i < cfg.lots; ++i) {
             queue.add(new Sell());
@@ -492,6 +535,8 @@ public class AutoAh implements ClientModInitializer {
                         return 2;
                     }
                     held = need;
+                    message(mc, "Розділення стака: є " + total + " шт., беру " + need
+                            + (raw ? " (серверний режим)" : " (звичайний режим)"));
                     return go(raw ? R_PICK : C_PICK);
                 }
 
@@ -526,7 +571,7 @@ public class AutoAh implements ClientModInitializer {
                     if (ok) {
                         clicks = 0;
                     }
-                    return waitOrFail(mc, ok, R_PUT, "Сервер не дозволив взяти стак. Зупинено.");
+                    return waitOrFail(mc, ok, R_PUT, "Сервер не дозволив взяти стак (у курсорі " + c.getCount() + " шт., потрібно " + total + "). Зупинено.");
                 }
                 case R_PUT: {
                     if (clicks >= need) {
@@ -544,6 +589,11 @@ public class AutoAh implements ClientModInitializer {
                     if (ok) {
                         clicks++;
                     }
+                    if (!ok && timeout <= 1) {
+                        abort(mc, "Сервер дозволив покласти в слот лише " + d.getCount() + " з " + need
+                                + " шт. (у курсорі " + c.getCount() + ", стак було " + total + "). Зупинено.");
+                        return 2;
+                    }
                     return waitOrFail(mc, ok, R_PUT, "Сервер не підтвердив розділення стака. Зупинено.");
                 }
                 case R_BACK: {
@@ -556,7 +606,10 @@ public class AutoAh implements ClientModInitializer {
                     boolean ok = mc.player.inventory.getCursorStack().isEmpty()
                             && mc.player.inventory.getStack(src).getCount() == total - need
                             && mc.player.inventory.getStack(dst).getCount() == need;
-                    return waitOrFail(mc, ok, EQUIP, "Сервер не повернув залишок стака. Зупинено.");
+                    return waitOrFail(mc, ok, EQUIP, "Сервер не повернув залишок стака (джерело "
+                            + mc.player.inventory.getStack(src).getCount() + ", лот "
+                            + mc.player.inventory.getStack(dst).getCount() + ", потрібно "
+                            + (total - need) + " і " + need + "). Зупинено.");
                 }
 
                 // ----- взяти предмет у руку
@@ -603,6 +656,8 @@ public class AutoAh implements ClientModInitializer {
                     String cmd = cfg.sellCommand.replace("{price}", cfg.price)
                             .replace("{count}", String.valueOf(cfg.perLot));
                     mc.player.sendChatMessage("/" + cmd);
+                    message(mc, "Команда: /" + cmd + "  (у руці "
+                            + mc.player.inventory.getStack(mc.player.inventory.selectedSlot).getCount() + " шт.)");
                     phase = DONE;
                     // чекаємо, щоб сервер встиг прибрати предмет з інвентарю
                     w = Math.max(Math.max(1, t(10)), 2 + pingTicks(mc));
