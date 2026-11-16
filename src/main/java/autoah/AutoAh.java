@@ -44,7 +44,6 @@ public class AutoAh implements ClientModInitializer {
     static KeyBinding guiKey;
     static final Random rnd = new Random();
 
-    // ---------- Плавна мишка ----------
     static boolean moving = false;
     static double sx, sy, tx, ty, bend;
     static long t0;
@@ -73,7 +72,6 @@ public class AutoAh implements ClientModInitializer {
         if (t >= 1.0) moving = false;
     }
 
-    // ---------- Кроки ----------
     interface Step { boolean tick(MinecraftClient mc); }
 
     static class Wait implements Step {
@@ -169,7 +167,6 @@ public class AutoAh implements ClientModInitializer {
         queue.add(mc -> { buildCycle(); return true; });
     }
 
-    // ---------- Конфіг ----------
     static File cfgFile() {
         return new File(MinecraftClient.getInstance().runDirectory, "config/autoah.json");
     }
@@ -203,13 +200,16 @@ public class AutoAh implements ClientModInitializer {
             mc.player.sendMessage(new LiteralText("[AutoAH] " + (on ? "ON" : "OFF")), true);
     }
 
-    // ---------- Вікно налаштувань ----------
-    static class CfgScreen extends Screen {
+    public static class CfgScreen extends Screen {
+        final Screen parent;
         TextFieldWidget fPrice, fCount, fTimer, fCmd, fLots, fCancel, fMove;
-        ButtonWidget bSlot, bStart;
+        ButtonWidget bSlot;
         int hotSlot;
 
-        CfgScreen() { super(new LiteralText("AutoAH")); }
+        public CfgScreen(Screen parent) {
+            super(new LiteralText("AutoAH"));
+            this.parent = parent;
+        }
 
         static int num(String s, int def) {
             try { return Integer.parseInt(s.trim()); } catch (Exception e) { return def; }
@@ -259,7 +259,7 @@ public class AutoAh implements ClientModInitializer {
                 apply();
                 saveCfg();
             }));
-            bStart = this.addButton(new ButtonWidget(this.width / 2 - 50, y, 100, 20,
+            this.addButton(new ButtonWidget(this.width / 2 - 50, y, 100, 20,
                     new LiteralText(running ? "Zupynyty" : "Start"), b -> {
                 apply();
                 saveCfg();
@@ -269,7 +269,7 @@ public class AutoAh implements ClientModInitializer {
             this.addButton(new ButtonWidget(this.width / 2 + 55, y, 100, 20, new LiteralText("Zakryty"), b -> {
                 apply();
                 saveCfg();
-                this.client.openScreen(null);
+                this.client.openScreen(parent);
             }));
         }
 
@@ -288,6 +288,13 @@ public class AutoAh implements ClientModInitializer {
             int[] arr = new int[list.size()];
             for (int i = 0; i < arr.length; i++) arr[i] = list.get(i);
             cfg.cancelSlots = arr;
+        }
+
+        @Override
+        public void onClose() {
+            apply();
+            saveCfg();
+            this.client.openScreen(parent);
         }
 
         @Override
@@ -314,7 +321,6 @@ public class AutoAh implements ClientModInitializer {
         public boolean isPauseScreen() { return false; }
     }
 
-    // ---------- Ініціалізація ----------
     @Override
     public void onInitializeClient() {
         toggleKey = KeyBindingHelper.registerKeyBinding(
@@ -328,10 +334,12 @@ public class AutoAh implements ClientModInitializer {
         ClientTickEvents.END_CLIENT_TICK.register(mc -> {
             while (toggleKey.wasPressed()) {
                 loadCfg();
-                setRunning(mc, !running);
+                if (running) setRunning(mc, false);
+                else if (mc.currentScreen == null) mc.openScreen(new CfgScreen(null));
             }
             while (guiKey.wasPressed()) {
-                if (mc.currentScreen == null) mc.openScreen(new CfgScreen());
+                loadCfg();
+                if (mc.currentScreen == null) mc.openScreen(new CfgScreen(null));
             }
             if (!running || mc.player == null) return;
             Step s = queue.peek();
