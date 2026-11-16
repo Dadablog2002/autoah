@@ -13,11 +13,12 @@ import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.client.util.math.MatrixStack;
-import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.screen.GenericContainerScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.LiteralText;
+import net.minecraft.text.MutableText;
+import net.minecraft.util.Formatting;
 import net.minecraft.util.registry.Registry;
 import org.lwjgl.glfw.GLFW;
 
@@ -36,19 +37,30 @@ public class AutoAh implements ClientModInitializer {
         String openCommand = "ah";
         String sellCommand = "ah sell {price}";
         int myLotsSlot = 49;
-        int moveMs = 450;
+        int speed = 2; // 1 Slow, 2 Normal, 3 Fast, 4 Turbo, 5 Instant
         boolean showSlots = true;
     }
+
+    static final String[] SPEED_NAMES = {"Slow", "Normal", "Fast", "Turbo", "Instant"};
+    static final double[] DELAY = {2.0, 1.0, 0.6, 0.35, 0.2};
+    static final int[] MOUSE_MS = {800, 450, 260, 140, 0};
 
     static Cfg cfg = new Cfg();
     static boolean cfgLoaded = false;
     static boolean running = false;
     static boolean noMore = false;
-    static Item sellItem = null;
+    static ItemStack sellStack = ItemStack.EMPTY;
     static final Deque<Step> queue = new ArrayDeque<>();
     static KeyBinding toggleKey;
     static KeyBinding guiKey;
     static final Random rnd = new Random();
+
+    // ---------- Speed helpers ----------
+    static int spd() { return Math.max(1, Math.min(5, cfg.speed)); }
+
+    static int t(int ticks) {
+        return Math.max(1, (int) Math.round(ticks * DELAY[spd() - 1]));
+    }
 
     // ---------- Smooth mouse ----------
     static boolean moving = false;
@@ -58,9 +70,15 @@ public class AutoAh implements ClientModInitializer {
 
     static void moveTo(double x, double y) {
         MinecraftClient mc = MinecraftClient.getInstance();
+        int base = MOUSE_MS[spd() - 1];
+        if (base <= 0) {
+            GLFW.glfwSetCursorPos(mc.getWindow().getHandle(), x, y);
+            moving = false;
+            return;
+        }
         sx = mc.mouse.getX(); sy = mc.mouse.getY();
         tx = x; ty = y;
-        dur = cfg.moveMs + rnd.nextInt(200);
+        dur = base + rnd.nextInt(base / 3 + 1);
         bend = (rnd.nextDouble() - 0.5) * 60;
         t0 = System.currentTimeMillis();
         moving = true;
@@ -68,15 +86,15 @@ public class AutoAh implements ClientModInitializer {
 
     static void frame() {
         if (!moving) return;
-        double t = Math.min(1.0, (System.currentTimeMillis() - t0) / (double) dur);
-        double s = t * t * (3 - 2 * t);
+        double tt = Math.min(1.0, (System.currentTimeMillis() - t0) / (double) dur);
+        double s = tt * tt * (3 - 2 * tt);
         double dx = tx - sx, dy = ty - sy;
         double len = Math.max(1, Math.hypot(dx, dy));
-        double off = Math.sin(Math.PI * t) * bend;
+        double off = Math.sin(Math.PI * tt) * bend;
         double x = sx + dx * s + (-dy / len) * off;
         double y = sy + dy * s + (dx / len) * off;
         GLFW.glfwSetCursorPos(MinecraftClient.getInstance().getWindow().getHandle(), x, y);
-        if (t >= 1.0) moving = false;
+        if (tt >= 1.0) moving = false;
     }
 
     // ---------- Helpers ----------
@@ -96,11 +114,35 @@ public class AutoAh implements ClientModInitializer {
         }
     }
 
-    static int findItem(MinecraftClient mc) {
-        if (sellItem == null) return -1;
+    static boolean same(ItemStack a, ItemStack b) {
+        return a.getItem() == b.getItem() && Objects.equals(a.getTag(), b.getTag());
+    }
+
+    // inventory index (0-8 hotbar, 9-35 main) -> slot id in the player screen handler
+    static int sl(int i) { return i < 9 ? i + 36 : i; }
+
+    static boolean needSplit() { return !cfg.sellCommand.contains("{count}"); }
+
+    // best stack to sell from: the smallest one that has enough items, else the biggest one
+    static int findSrc(MinecraftClient mc) {
+        if (sellStack.isEmpty()) return -1;
+        int best = -1;
         for (int i = 0; i < 36; i++) {
             ItemStack s = mc.player.inventory.getStack(i);
-            if (!s.isEmpty() && s.getItem() == sellItem) return i;
+            if (s.isEmpty() || !same(s, sellStack)) continue;
+            if (best < 0) { best = i; continue; }
+            int cb = mc.player.inventory.getStack(best).getCount();
+            int c = s.getCount();
+            boolean bOk = cb >= cfg.perLot, cOk = c >= cfg.perLot;
+            if (cOk && (!bOk || c < cb)) best = i;
+            else if (!cOk && !bOk && c > cb) best = i;
+        }
+        return best;
+    }
+
+    static int findEmpty(MinecraftClient mc, int exclude) {
+        for (int i = 0; i < 36; i++) {
+            if (i != exclude && mc.player.inventory.getStack(i).isEmpty()) return i;
         }
         return -1;
     }
@@ -125,7 +167,7 @@ public class AutoAh implements ClientModInitializer {
     }
 
     static class Cmd implements Step {
-        String c; boolean sent; int w = 10;
+        String c; boolean sent; int w = t(10);
         Cmd(String c) { this.c = c; }
         public boolean tick(MinecraftClient mc) {
             if (!sent) {
@@ -137,36 +179,76 @@ public class AutoAh implements ClientModInitializer {
         }
     }
 
+    // Prepares exactly "items per lot" in hand (splitting the stack without opening the inventory) and sells
     static class Sell implements Step {
-        int phase = 0, w = 6;
+        int phase = 0, w = 0, src = -1, dst = -1, need = 1, clicks = 0;
+
         public boolean tick(MinecraftClient mc) {
             if (noMore) return true;
-            if (phase == 0) {
-                int idx = findItem(mc);
-                if (idx < 0) { noMore = true; return true; }
-                int target = Math.max(0, Math.min(8, cfg.hotbarSlot - 1));
-                if (idx < 9) {
-                    mc.player.inventory.selectedSlot = idx;
-                } else {
-                    mc.interactionManager.clickSlot(mc.player.playerScreenHandler.syncId, idx, target, SlotActionType.SWAP, mc.player);
-                    mc.player.inventory.selectedSlot = target;
+            int hid = mc.player.playerScreenHandler.syncId;
+            int target = Math.max(0, Math.min(8, cfg.hotbarSlot - 1));
+            switch (phase) {
+                case 0: {
+                    src = findSrc(mc);
+                    if (src < 0) { noMore = true; return true; }
+                    if (!mc.player.inventory.getCursorStack().isEmpty()) {
+                        finish(mc, "Your cursor holds an item. Stopped.");
+                        return true;
+                    }
+                    ItemStack s = mc.player.inventory.getStack(src);
+                    need = Math.min(cfg.perLot, s.getCount());
+                    if (!needSplit() || need >= s.getCount()) {
+                        dst = src;
+                        phase = 4;
+                        return false;
+                    }
+                    dst = findEmpty(mc, src);
+                    if (dst < 0) {
+                        finish(mc, "No free inventory slot to split the stack. Stopped.");
+                        return true;
+                    }
+                    phase = 1;
+                    return false;
                 }
-                phase = 1;
-            } else if (phase == 1) {
-                if (--w <= 0) {
-                    String s = cfg.sellCommand.replace("{price}", cfg.price).replace("{count}", String.valueOf(cfg.perLot));
-                    mc.player.sendChatMessage("/" + s);
-                    phase = 2; w = 10;
-                }
-            } else {
-                return --w <= 0;
+                case 1:
+                    mc.interactionManager.clickSlot(hid, sl(src), 0, SlotActionType.PICKUP, mc.player);
+                    clicks = need;
+                    phase = 2;
+                    return false;
+                case 2:
+                    mc.interactionManager.clickSlot(hid, sl(dst), 1, SlotActionType.PICKUP, mc.player);
+                    if (--clicks <= 0) phase = 3;
+                    return false;
+                case 3:
+                    mc.interactionManager.clickSlot(hid, sl(src), 0, SlotActionType.PICKUP, mc.player);
+                    phase = 4;
+                    return false;
+                case 4:
+                    if (dst < 9) {
+                        mc.player.inventory.selectedSlot = dst;
+                    } else {
+                        mc.interactionManager.clickSlot(hid, sl(dst), target, SlotActionType.SWAP, mc.player);
+                        mc.player.inventory.selectedSlot = target;
+                    }
+                    phase = 5;
+                    w = t(6);
+                    return false;
+                case 5:
+                    if (--w <= 0) {
+                        String s = cfg.sellCommand.replace("{price}", cfg.price).replace("{count}", String.valueOf(cfg.perLot));
+                        mc.player.sendChatMessage("/" + s);
+                        phase = 6;
+                        w = t(10);
+                    }
+                    return false;
+                default:
+                    return --w <= 0;
             }
-            return false;
         }
     }
 
     static class WaitScreen implements Step {
-        int timeout = 100;
+        int timeout = 120;
         public boolean tick(MinecraftClient mc) {
             if (mc.currentScreen instanceof GenericContainerScreen) return true;
             if (--timeout <= 0) { finish(mc, "The /ah menu did not open. Stopped."); }
@@ -179,7 +261,7 @@ public class AutoAh implements ClientModInitializer {
     }
 
     static class Click implements Step {
-        int slot; int phase = 0; int w = 12;
+        int slot; int phase = 0; int w = t(10);
         Click(int slot) { this.slot = slot; }
         public boolean tick(MinecraftClient mc) {
             if (!(mc.currentScreen instanceof GenericContainerScreen)) return false;
@@ -202,7 +284,7 @@ public class AutoAh implements ClientModInitializer {
 
     // Takes down only lots that really exist (non-empty cells in the "my lots" menu)
     static class CancelAll implements Step {
-        int phase = 0, w = 15, slot = -1, done = 0;
+        int phase = 0, w = 10, slot = -1, done = 0;
 
         int findLot(GenericContainerScreenHandler h) {
             int limit = h.getRows() * 9 - 9;
@@ -230,7 +312,7 @@ public class AutoAh implements ClientModInitializer {
             } else if (phase == 1 && !moving) {
                 mc.interactionManager.clickSlot(h.syncId, slot, 0, SlotActionType.PICKUP, mc.player);
                 done++;
-                w = 15 + rnd.nextInt(10);
+                w = t(10) + rnd.nextInt(t(6) + 1);
                 phase = 2;
             } else if (phase == 2) {
                 if (--w <= 0) phase = 0;
@@ -240,21 +322,21 @@ public class AutoAh implements ClientModInitializer {
     }
 
     static void buildRound(MinecraftClient mc) {
-        if (findItem(mc) < 0) { finish(mc, "Done. No more items to sell."); return; }
+        if (findSrc(mc) < 0) { finish(mc, "Done. No more items to sell."); return; }
         noMore = false;
         for (int i = 0; i < cfg.lots; i++) {
             queue.add(new Sell());
-            queue.add(new Wait(10 + rnd.nextInt(15)));
+            queue.add(new Wait(t(8) + rnd.nextInt(t(8) + 1)));
         }
         queue.add(new Wait(Math.max(1, cfg.timerSeconds) * 20));
         queue.add(new Cmd(cfg.openCommand));
         queue.add(new WaitScreen());
-        queue.add(new Wait(10));
+        queue.add(new Wait(t(8)));
         queue.add(new Click(cfg.myLotsSlot));
-        queue.add(new Wait(15));
+        queue.add(new Wait(t(12)));
         queue.add(new CancelAll());
         queue.add(new Close());
-        queue.add(new Wait(30));
+        queue.add(new Wait(t(20)));
         queue.add(m -> { buildRound(m); return true; });
     }
 
@@ -293,19 +375,22 @@ public class AutoAh implements ClientModInitializer {
             message(mc, "The chosen hotbar slot is empty. Put the item there and pick that slot.");
             return;
         }
-        sellItem = st.getItem();
+        sellStack = st.copy();
         running = true;
         message(mc, "Started. Selling: " + st.getName().getString());
         buildRound(mc);
     }
 
     // ---------- Settings screen ----------
+    static MutableText bold(String s) { return new LiteralText(s).formatted(Formatting.BOLD); }
+
     public static class CfgScreen extends Screen {
         final Screen parent;
-        TextFieldWidget fPrice, fPer, fLots, fTimer, fCmd, fMy, fMove;
-        ButtonWidget bSlot, bShow;
-        int hotSlot;
+        TextFieldWidget fPrice, fPer, fLots, fTimer, fCmd, fMy;
+        ButtonWidget bSpeed, bSlot, bShow;
+        int hotSlot, speed;
         boolean show;
+        int y0 = 44, rowH = 24;
 
         public CfgScreen(Screen parent) {
             super(new LiteralText("AutoAH"));
@@ -317,7 +402,7 @@ public class AutoAh implements ClientModInitializer {
         }
 
         TextFieldWidget field(int row, String value, int max) {
-            TextFieldWidget f = new TextFieldWidget(this.textRenderer, this.width / 2 - 20, 30 + row * 22, 150, 18, new LiteralText(""));
+            TextFieldWidget f = new TextFieldWidget(this.textRenderer, this.width / 2 + 10, y0 + row * rowH, 160, 18, new LiteralText(""));
             f.setMaxLength(max);
             f.setText(value);
             this.addButton(f);
@@ -332,43 +417,49 @@ public class AutoAh implements ClientModInitializer {
             return "Slot " + hotSlot + ": " + name;
         }
 
-        String showLabel() { return "Show slot numbers in /ah: " + (show ? "ON" : "OFF"); }
+        String speedLabel() { return "Speed: " + SPEED_NAMES[speed - 1]; }
+        String showLabel() { return "Slot numbers in /ah: " + (show ? "ON" : "OFF"); }
 
         @Override
         protected void init() {
             loadCfg();
             hotSlot = Math.max(1, Math.min(9, cfg.hotbarSlot));
+            speed = Math.max(1, Math.min(5, cfg.speed));
             show = cfg.showSlots;
+            rowH = Math.max(21, Math.min(26, (this.height - 110) / 9));
             fPrice = field(0, cfg.price, 20);
             fPer = field(1, String.valueOf(cfg.perLot), 4);
             fLots = field(2, String.valueOf(cfg.lots), 3);
             fTimer = field(3, String.valueOf(cfg.timerSeconds), 6);
             fCmd = field(4, cfg.sellCommand, 60);
             fMy = field(5, String.valueOf(cfg.myLotsSlot), 4);
-            fMove = field(6, String.valueOf(cfg.moveMs), 5);
 
-            bSlot = this.addButton(new ButtonWidget(this.width / 2 - 20, 30 + 7 * 22, 150, 20, new LiteralText(slotLabel()), b -> {
+            bSpeed = this.addButton(new ButtonWidget(this.width / 2 + 10, y0 + 6 * rowH - 1, 160, 20, bold(speedLabel()), b -> {
+                speed = speed % 5 + 1;
+                b.setMessage(bold(speedLabel()));
+            }));
+            bSlot = this.addButton(new ButtonWidget(this.width / 2 + 10, y0 + 7 * rowH - 1, 160, 20, bold(slotLabel()), b -> {
                 hotSlot = hotSlot % 9 + 1;
-                b.setMessage(new LiteralText(slotLabel()));
+                b.setMessage(bold(slotLabel()));
             }));
-            bShow = this.addButton(new ButtonWidget(this.width / 2 - 20, 30 + 8 * 22, 150, 20, new LiteralText(showLabel()), b -> {
+            bShow = this.addButton(new ButtonWidget(this.width / 2 + 10, y0 + 8 * rowH - 1, 160, 20, bold(showLabel()), b -> {
                 show = !show;
-                b.setMessage(new LiteralText(showLabel()));
+                b.setMessage(bold(showLabel()));
             }));
 
-            int y = 30 + 9 * 22 + 6;
-            this.addButton(new ButtonWidget(this.width / 2 - 155, y, 100, 20, new LiteralText("Save"), b -> {
+            int y = y0 + 9 * rowH + 8;
+            this.addButton(new ButtonWidget(this.width / 2 - 175, y, 110, 20, bold("Save"), b -> {
                 apply();
                 saveCfg();
             }));
-            this.addButton(new ButtonWidget(this.width / 2 - 50, y, 100, 20,
-                    new LiteralText(running ? "Stop" : "Start"), b -> {
+            this.addButton(new ButtonWidget(this.width / 2 - 55, y, 110, 20,
+                    bold(running ? "Stop" : "Start"), b -> {
                 apply();
                 saveCfg();
                 setRunning(this.client, !running);
                 this.client.openScreen(null);
             }));
-            this.addButton(new ButtonWidget(this.width / 2 + 55, y, 100, 20, new LiteralText("Close"), b -> {
+            this.addButton(new ButtonWidget(this.width / 2 + 65, y, 110, 20, bold("Close"), b -> {
                 apply();
                 saveCfg();
                 this.client.openScreen(parent);
@@ -382,7 +473,7 @@ public class AutoAh implements ClientModInitializer {
             cfg.timerSeconds = Math.max(1, num(fTimer.getText(), 300));
             cfg.sellCommand = fCmd.getText().trim();
             cfg.myLotsSlot = Math.max(0, num(fMy.getText(), 49));
-            cfg.moveMs = Math.max(100, num(fMove.getText(), 450));
+            cfg.speed = speed;
             cfg.hotbarSlot = hotSlot;
             cfg.showSlots = show;
         }
@@ -397,19 +488,43 @@ public class AutoAh implements ClientModInitializer {
         @Override
         public void tick() {
             fPrice.tick(); fPer.tick(); fLots.tick(); fTimer.tick();
-            fCmd.tick(); fMy.tick(); fMove.tick();
+            fCmd.tick(); fMy.tick();
         }
 
         @Override
         public void render(MatrixStack m, int mx, int my, float d) {
             this.renderBackground(m);
-            drawCenteredText(m, this.textRenderer, new LiteralText("AutoAH - settings"), this.width / 2, 10, 0xFFFFFF);
-            int lx = this.width / 2 - 170;
-            String[] labels = {"Price", "Items per lot", "Lots per round", "Wait before cancel (sec)",
-                    "Sell command", "My lots button slot", "Mouse speed (ms)", "Item to sell", "Debug"};
+            int cx = this.width / 2;
+            int left = cx - 185, right = cx + 185;
+            int panelBottom = y0 + 9 * rowH + 34;
+
+            // panel with border
+            fill(m, left - 2, 28, right + 2, panelBottom + 2, 0xFF000000);
+            fill(m, left, 30, right, panelBottom, 0xE6201A14);
+            fill(m, left, 30, right, 32, 0xFFFFAA00);
+
+            // big bold title
+            m.push();
+            m.scale(2.0F, 2.0F, 1.0F);
+            drawCenteredText(m, this.textRenderer, bold("AutoAH"), cx / 2, 4, 0xFFAA00);
+            m.pop();
+
+            // striped rows with bold labels
+            String[] labels = {"Price", "Items per lot", "Lots per round", "Wait before cancel (s)",
+                    "Sell command", "My lots button slot", "Work speed", "Item to sell", "Debug"};
             for (int i = 0; i < labels.length; i++) {
-                this.textRenderer.drawWithShadow(m, labels[i], lx, 35 + i * 22, 0xAAAAAA);
+                int ry = y0 + i * rowH;
+                fill(m, left + 4, ry - 2, right - 4, ry + rowH - 3, (i % 2 == 0) ? 0x30FFFFFF : 0x14FFFFFF);
+                this.textRenderer.drawWithShadow(m, bold(labels[i]), left + 10, ry + 5, 0xFFE08A);
             }
+
+            // status + hint
+            int sy2 = y0 + 9 * rowH + 34;
+            String status = running ? "RUNNING" : "STOPPED";
+            drawCenteredText(m, this.textRenderer, bold("Status: " + status), cx, sy2 + 2, running ? 0x55FF55 : 0xFF5555);
+            drawCenteredText(m, this.textRenderer, new LiteralText("Add {count} to the command if the server supports an amount."), cx, sy2 + 14, 0xAAAAAA);
+            drawCenteredText(m, this.textRenderer, new LiteralText("Without {count} stacks are split automatically."), cx, sy2 + 25, 0xAAAAAA);
+
             super.render(m, mx, my, d);
         }
 
