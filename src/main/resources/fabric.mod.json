@@ -1,13 +1,17 @@
 {
   "schemaVersion": 1,
   "id": "autoah",
-  "version": "1.0",
+  "version": "${version}",
   "name": "AutoAH",
-  "description": "Auto sell on /ah",
+  "description": "Автоматичний продаж на аукціоні (/ah)",
   "environment": "client",
   "entrypoints": {
     "client": ["autoah.AutoAh"],
     "modmenu": ["autoah.ModMenuIntegration"]
   },
-  "depends": { "fabricloader": "*", "fabric": "*", "minecraft": "1.16.5" }
+  "depends": {
+    "fabricloader": "*",
+    "fabric": "*",
+    "minecraft": "1.16.5"
+  }
 }
