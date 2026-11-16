@@ -7,6 +7,7 @@ import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ingame.GenericContainerScreen;
+import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.screen.GenericContainerScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
@@ -34,7 +35,7 @@ public class AutoAh implements ClientModInitializer {
     static Cfg cfg = new Cfg();
     static boolean running = false;
     static final Deque<Step> queue = new ArrayDeque<>();
-    static net.minecraft.client.options.KeyBinding toggleKey;
+    static KeyBinding toggleKey;
     static final Random rnd = new Random();
 
     static boolean moving = false;
@@ -89,7 +90,7 @@ public class AutoAh implements ClientModInitializer {
         int timeout = 100;
         public boolean tick(MinecraftClient mc) {
             if (mc.currentScreen instanceof GenericContainerScreen) return true;
-            if (--timeout <= 0) { fail(mc, "Меню не відкрилось"); }
+            if (--timeout <= 0) { fail(mc, "Menu ne vidkrylos"); }
             return false;
         }
     }
@@ -136,7 +137,7 @@ public class AutoAh implements ClientModInitializer {
         queue.clear();
         if (mc.player != null) {
             mc.player.closeHandledScreen();
-            mc.player.sendMessage(new LiteralText("§c[AutoAH] " + msg + ", повтор через 5с"), false);
+            mc.player.sendMessage(new LiteralText("[AutoAH] " + msg + ", povtor cherez 5s"), false);
         }
         queue.add(new Wait(100));
         queue.add(mc2 -> { buildCycle(); return true; });
@@ -164,15 +165,15 @@ public class AutoAh implements ClientModInitializer {
         File f = new File(MinecraftClient.getInstance().runDirectory, "config/autoah.json");
         Gson g = new GsonBuilder().setPrettyPrinting().create();
         try {
-            if (f.exists()) cfg = g.fromJson(new String(Files.readAllBytes(f.toPath())), Cfg.class);
-            else { f.getParentFile().mkdirs(); Files.write(f.toPath(), g.toJson(cfg).getBytes()); }
+            if (f.exists()) cfg = g.fromJson(new String(Files.readAllBytes(f.toPath()), "UTF-8"), Cfg.class);
+            else { f.getParentFile().mkdirs(); Files.write(f.toPath(), g.toJson(cfg).getBytes("UTF-8")); }
         } catch (Exception e) { e.printStackTrace(); }
     }
 
     @Override
     public void onInitializeClient() {
         toggleKey = KeyBindingHelper.registerKeyBinding(
-                new KeyBinding("AutoAH вкл/викл", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_R, "AutoAH"));
+                new KeyBinding("AutoAH toggle", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_R, "AutoAH"));
 
         ScreenEvents.AFTER_INIT.register((mc, screen, w, h) ->
                 ScreenEvents.afterRender(screen).register((s, m, mx, my, d) -> frame()));
@@ -183,7 +184,7 @@ public class AutoAh implements ClientModInitializer {
                 queue.clear(); moving = false;
                 if (running) { loadCfg(); buildCycle(); }
                 if (mc.player != null)
-                    mc.player.sendMessage(new LiteralText("[AutoAH] " + (running ? "§aУВІМКНЕНО" : "§cВИМКНЕНО")), true);
+                    mc.player.sendMessage(new LiteralText("[AutoAH] " + (running ? "ON" : "OFF")), true);
             }
             if (!running || mc.player == null) return;
             Step s = queue.peek();
