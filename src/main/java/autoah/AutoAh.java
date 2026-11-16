@@ -19,12 +19,12 @@ import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.client.gui.widget.TextFieldWidget;
 import net.minecraft.client.network.ClientPlayNetworkHandler;
 import net.minecraft.client.network.PlayerListEntry;
-import net.minecraft.client.options.KeyBinding;
+import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.network.packet.c2s.play.ClickWindowC2SPacket;
+import net.minecraft.network.packet.c2s.play.ClickSlotC2SPacket;
 import net.minecraft.screen.GenericContainerScreenHandler;
 import net.minecraft.screen.slot.Slot;
 import net.minecraft.screen.slot.SlotActionType;
@@ -200,7 +200,7 @@ public class AutoAh implements ClientModInitializer {
             return;
         }
         short id = mc.player.playerScreenHandler.getNextActionId(mc.player.inventory);
-        net.sendPacket(new ClickWindowC2SPacket(mc.player.playerScreenHandler.syncId, slot, button, type,
+        net.sendPacket(new ClickSlotC2SPacket(mc.player.playerScreenHandler.syncId, slot, button, type,
                 new ItemStack(Items.BARRIER), id));
     }
 
