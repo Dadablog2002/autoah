@@ -320,7 +320,7 @@ public class AutoAh implements ClientModInitializer {
         toggleKey = KeyBindingHelper.registerKeyBinding(
                 new KeyBinding("AutoAH start/stop", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_R, "AutoAH"));
         guiKey = KeyBindingHelper.registerKeyBinding(
-                new KeyBinding("AutoAH menu", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_G, "AutoAH"));
+                new KeyBinding("AutoAH menu", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_J, "AutoAH"));
 
         ScreenEvents.AFTER_INIT.register((mc, screen, w, h) ->
                 ScreenEvents.afterRender(screen).register((s, m, mx, my, d) -> frame()));
