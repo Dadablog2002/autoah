@@ -239,18 +239,27 @@ public class AutoAh implements ClientModInitializer {
     }
 
     // ---------------------------------------------------------------- повідомлення
-    static void message(MinecraftClient mc, String text) {
+    static void message(MinecraftClient mc, String text, Formatting color) {
         if (mc.player != null) {
-            mc.player.sendMessage(new LiteralText("[AutoAH] ").formatted(Formatting.GOLD)
-                    .append(new LiteralText(text).formatted(Formatting.WHITE)), false);
+            mc.player.sendMessage(new LiteralText("[AutoAH] " + text).formatted(color), false);
         }
+    }
+
+    /** Початок роботи — зелений. */
+    static void messageStart(MinecraftClient mc, String text) {
+        message(mc, text, Formatting.GREEN);
+    }
+
+    /** Кінець / зупинка — червоний. */
+    static void messageEnd(MinecraftClient mc, String text) {
+        message(mc, text, Formatting.RED);
     }
 
     static void finish(MinecraftClient mc, String text) {
         running = false;
         queue.clear();
         moving = false;
-        message(mc, text);
+        messageEnd(mc, text);
     }
 
     static int emptyRetries = 0;
@@ -340,18 +349,18 @@ public class AutoAh implements ClientModInitializer {
         moving = false;
         if (!on) {
             running = false;
-            message(mc, "Зупинено.");
+            messageEnd(mc, "Зупинено.");
             return;
         }
         ItemStack st = mc.player.inventory.getStack(Math.max(0, Math.min(8, cfg.hotbarSlot - 1)));
         if (st.isEmpty()) {
             running = false;
-            message(mc, "Обраний слот хотбару порожній. Покладіть туди предмет і оберіть цей слот.");
+            messageEnd(mc, "Обраний слот хотбару порожній. Покладіть туди предмет і оберіть цей слот.");
             return;
         }
         sellStack = st.copy();
         running = true;
-        message(mc, "Запущено. Продаю: " + st.getName().getString());
+        messageStart(mc, "Початок. Продаю: " + st.getName().getString());
         buildRound(mc);
     }
 
@@ -535,8 +544,6 @@ public class AutoAh implements ClientModInitializer {
                         return 2;
                     }
                     held = need;
-                    message(mc, "Розділення стака: є " + total + " шт., беру " + need
-                            + (raw ? " (серверний режим)" : " (звичайний режим)"));
                     return go(raw ? R_PICK : C_PICK);
                 }
 
@@ -656,8 +663,6 @@ public class AutoAh implements ClientModInitializer {
                     String cmd = cfg.sellCommand.replace("{price}", cfg.price)
                             .replace("{count}", String.valueOf(cfg.perLot));
                     mc.player.sendChatMessage("/" + cmd);
-                    message(mc, "Команда: /" + cmd + "  (у руці "
-                            + mc.player.inventory.getStack(mc.player.inventory.selectedSlot).getCount() + " шт.)");
                     phase = DONE;
                     // чекаємо, щоб сервер встиг прибрати предмет з інвентарю
                     w = Math.max(Math.max(1, t(10)), 2 + pingTicks(mc));
