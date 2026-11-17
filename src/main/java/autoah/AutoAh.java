@@ -5,7 +5,9 @@ import com.google.gson.GsonBuilder;
 import java.io.File;
 import java.nio.file.Files;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
+import java.util.List;
 import java.util.Objects;
 import java.util.Random;
 import net.fabricmc.api.ClientModInitializer;
@@ -53,7 +55,8 @@ public class AutoAh implements ClientModInitializer {
     static boolean cfgLoaded = false;
     static boolean running = false;
     static boolean noMore = false;
-    static ItemStack sellStack = ItemStack.EMPTY;
+    /** Усі предмети, які продаємо (по одному еталону на кожен вид). */
+    static final List<ItemStack> sellStacks = new ArrayList<ItemStack>();
     static final Deque<Step> queue = new ArrayDeque<Step>();
     static KeyBinding toggleKey;
     static KeyBinding guiKey;
@@ -165,14 +168,14 @@ public class AutoAh implements ClientModInitializer {
         return !cfg.sellCommand.contains("{count}");
     }
 
-    static int findSrc(MinecraftClient mc) {
-        if (sellStack.isEmpty()) {
+    static int findSrc(MinecraftClient mc, ItemStack ref) {
+        if (ref.isEmpty()) {
             return -1;
         }
         int best = -1;
         for (int i = 0; i < 36; ++i) {
             ItemStack s = mc.player.inventory.getStack(i);
-            if (s.isEmpty() || !same(s, sellStack)) {
+            if (s.isEmpty() || !same(s, ref)) {
                 continue;
             }
             if (best < 0) {
@@ -193,6 +196,27 @@ public class AutoAh implements ClientModInitializer {
             best = i;
         }
         return best;
+    }
+
+    /** Є хоч один вид предмета, який ще можна продавати. */
+    static boolean anyAvailable(MinecraftClient mc) {
+        for (ItemStack ref : sellStacks) {
+            if (findSrc(mc, ref) >= 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Випадковий вид серед тих, що ще є в інвентарі (null — нічого немає). */
+    static ItemStack pickRandomType(MinecraftClient mc) {
+        List<ItemStack> ok = new ArrayList<ItemStack>();
+        for (ItemStack ref : sellStacks) {
+            if (findSrc(mc, ref) >= 0) {
+                ok.add(ref);
+            }
+        }
+        return ok.isEmpty() ? null : ok.get(rnd.nextInt(ok.size()));
     }
 
     static int findEmpty(MinecraftClient mc, int exclude) {
@@ -265,7 +289,7 @@ public class AutoAh implements ClientModInitializer {
     static int emptyRetries = 0;
 
     static void buildRound(MinecraftClient mc) {
-        if (findSrc(mc) < 0) {
+        if (!anyAvailable(mc)) {
             // предмети після скасування лотів можуть повертатися з затримкою — трохи чекаємо
             if (emptyRetries++ < 6) {
                 queue.add(new Wait(20));
@@ -279,8 +303,11 @@ public class AutoAh implements ClientModInitializer {
             int other = 0;
             for (int i = 0; i < 36; ++i) {
                 ItemStack s = mc.player.inventory.getStack(i);
-                if (!s.isEmpty() && s.getItem() == sellStack.getItem()) {
-                    other += s.getCount();
+                for (ItemStack ref : sellStacks) {
+                    if (!s.isEmpty() && s.getItem() == ref.getItem()) {
+                        other += s.getCount();
+                        break;
+                    }
                 }
             }
             if (other > 0) {
@@ -344,6 +371,15 @@ public class AutoAh implements ClientModInitializer {
         }
     }
 
+    /** Маска обраних слотів хотбару (біт 0 = слот 1). Якщо нічого не обрано — старий одиночний слот. */
+    static int slotMask() {
+        int m = cfg.slotMask & 0x1FF;
+        if (m == 0) {
+            m = 1 << (Math.max(1, Math.min(9, cfg.hotbarSlot)) - 1);
+        }
+        return m;
+    }
+
     static void setRunning(MinecraftClient mc, boolean on) {
         queue.clear();
         moving = false;
@@ -352,15 +388,40 @@ public class AutoAh implements ClientModInitializer {
             messageEnd(mc, "Зупинено.");
             return;
         }
-        ItemStack st = mc.player.inventory.getStack(Math.max(0, Math.min(8, cfg.hotbarSlot - 1)));
-        if (st.isEmpty()) {
+        sellStacks.clear();
+        StringBuilder names = new StringBuilder();
+        int mask = slotMask();
+        for (int i = 0; i < 9; i++) {
+            if ((mask & (1 << i)) == 0) {
+                continue;
+            }
+            ItemStack st = mc.player.inventory.getStack(i);
+            if (st.isEmpty()) {
+                continue;
+            }
+            boolean dup = false;
+            for (ItemStack ex : sellStacks) {
+                if (same(st, ex)) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (dup) {
+                continue;
+            }
+            sellStacks.add(st.copy());
+            if (names.length() > 0) {
+                names.append(", ");
+            }
+            names.append(st.getName().getString());
+        }
+        if (sellStacks.isEmpty()) {
             running = false;
-            messageEnd(mc, "Обраний слот хотбару порожній. Покладіть туди предмет і оберіть цей слот.");
+            messageEnd(mc, "Обрані слоти хотбару порожні. Покладіть предмети й оберіть їх у меню.");
             return;
         }
-        sellStack = st.copy();
         running = true;
-        messageStart(mc, "Початок. Продаю: " + st.getName().getString());
+        messageStart(mc, "Початок. Продаю: " + names);
         buildRound(mc);
     }
 
@@ -424,6 +485,7 @@ public class AutoAh implements ClientModInitializer {
         int perLot = 1;
         int lots = 5;
         int hotbarSlot = 1;
+        int slotMask = 0;
         int timerSeconds = 300;
         String openCommand = "ah";
         String sellCommand = "ah sell {price}";
@@ -518,11 +580,12 @@ public class AutoAh implements ClientModInitializer {
             int target = Math.max(0, Math.min(8, cfg.hotbarSlot - 1));
             switch (phase) {
                 case START: {
-                    src = findSrc(mc);
-                    if (src < 0) {
+                    ItemStack ref = pickRandomType(mc);
+                    if (ref == null) {
                         noMore = true;
                         return 2;
                     }
+                    src = findSrc(mc, ref);
                     if (!mc.player.inventory.getCursorStack().isEmpty()) {
                         finish(mc, "У курсорі лежить предмет. Зупинено.");
                         return 2;
@@ -826,9 +889,9 @@ public class AutoAh implements ClientModInitializer {
         TextFieldWidget fCmd;
         TextFieldWidget fMy;
         ButtonWidget bSpeed;
-        ButtonWidget bSlot;
+        ButtonWidget[] tog = new ButtonWidget[9];
         ButtonWidget bShow;
-        int hotSlot;
+        int mask;
         int speed;
         boolean show;
 
@@ -841,7 +904,7 @@ public class AutoAh implements ClientModInitializer {
         static final int CTRL_W = 160;
         static final String[] LABELS = {
                 "Ціна", "Предметів у лоті", "Лотів за раунд", "Пауза до скасування (с)",
-                "Команда продажу", "Слот «Мої лоти»", "Швидкість роботи", "Предмет для продажу",
+                "Команда продажу", "Слот «Мої лоти»", "Швидкість роботи", "Предмети (слоти 1–9)",
                 "Номери слотів у /ah"
         };
 
@@ -875,17 +938,6 @@ public class AutoAh implements ClientModInitializer {
             return f;
         }
 
-        String slotLabel() {
-            String name = "";
-            if (this.client != null && this.client.player != null) {
-                name = this.client.player.inventory.getStack(this.hotSlot - 1).getName().getString();
-                if (name.length() > 16) {
-                    name = name.substring(0, 15) + "…";
-                }
-            }
-            return "Слот " + this.hotSlot + ": " + name;
-        }
-
         String speedLabel() {
             return SPEED_NAMES[this.speed - 1];
         }
@@ -897,7 +949,7 @@ public class AutoAh implements ClientModInitializer {
         @Override
         protected void init() {
             loadCfg();
-            this.hotSlot = Math.max(1, Math.min(9, cfg.hotbarSlot));
+            this.mask = slotMask();
             this.speed = Math.max(1, Math.min(MAX_SPEED, cfg.speed));
             this.show = cfg.showSlots;
 
@@ -918,11 +970,11 @@ public class AutoAh implements ClientModInitializer {
                         this.speed = this.speed % MAX_SPEED + 1;
                         b.setMessage(new LiteralText(speedLabel()));
                     }));
-            this.bSlot = this.addButton(new ButtonWidget(ctrlX(), ctrlY(7), CTRL_W, CTRL_H,
-                    new LiteralText(slotLabel()), b -> {
-                        this.hotSlot = this.hotSlot % 9 + 1;
-                        b.setMessage(new LiteralText(slotLabel()));
-                    }));
+            for (int k = 0; k < 9; k++) {
+                final int bit = 1 << k;
+                this.tog[k] = this.addButton(new ButtonWidget(ctrlX() + 4 + k * 17, ctrlY(7), 16, CTRL_H,
+                        new LiteralText(""), b -> this.mask ^= bit));
+            }
             this.bShow = this.addButton(new ButtonWidget(ctrlX(), ctrlY(8), CTRL_W, CTRL_H,
                     new LiteralText(showLabel()), b -> {
                         this.show = !this.show;
@@ -956,7 +1008,11 @@ public class AutoAh implements ClientModInitializer {
             cfg.sellCommand = this.fCmd.getText().trim();
             cfg.myLotsSlot = Math.max(0, num(this.fMy.getText(), 49));
             cfg.speed = this.speed;
-            cfg.hotbarSlot = this.hotSlot;
+            if (this.mask == 0) {
+                this.mask = 1;
+            }
+            cfg.slotMask = this.mask;
+            cfg.hotbarSlot = Integer.numberOfTrailingZeros(this.mask) + 1;
             cfg.showSlots = this.show;
         }
 
@@ -1021,6 +1077,27 @@ public class AutoAh implements ClientModInitializer {
             this.centered(m, "Без {count} — стак ділиться автоматично.", cx, sy + 22, 0x555555);
 
             super.render(m, mx, my, d);
+
+            // іконки предметів хотбару; обрані підсвічені зеленим рамкою, необрані притемнені
+            for (int k = 0; k < 9; k++) {
+                int bx = ctrlX() + 4 + k * 17;
+                int by = ctrlY(7);
+                ItemStack st = this.client.player.inventory.getStack(k);
+                if (!st.isEmpty()) {
+                    this.client.getItemRenderer().renderGuiItemIcon(st, bx, by + 1);
+                }
+                m.push();
+                m.translate(0.0, 0.0, 300.0);
+                if ((this.mask & (1 << k)) != 0) {
+                    fill(m, bx, by, bx + 16, by + 2, 0xFF55FF55);
+                    fill(m, bx, by + CTRL_H - 2, bx + 16, by + CTRL_H, 0xFF55FF55);
+                    fill(m, bx, by, bx + 2, by + CTRL_H, 0xFF55FF55);
+                    fill(m, bx + 14, by, bx + 16, by + CTRL_H, 0xFF55FF55);
+                } else {
+                    fill(m, bx, by, bx + 16, by + CTRL_H, 0x99000000);
+                }
+                m.pop();
+            }
         }
 
         @Override
