@@ -286,6 +286,35 @@ public class AutoAh implements ClientModInitializer {
         messageEnd(mc, text);
     }
 
+    // ---------------------------------------------------------------- анти-АФК (рух камери)
+    static int afkWait = 100;
+    static int afkSteps = 0;
+    static float afkDYaw = 0f;
+    static float afkDPitch = 0f;
+
+    static void antiAfkTick(MinecraftClient mc) {
+        if (mc.player == null) {
+            return;
+        }
+        if (afkSteps > 0) {
+            mc.player.yaw += afkDYaw;
+            float p = mc.player.pitch + afkDPitch;
+            mc.player.pitch = Math.max(-60.0f, Math.min(60.0f, p));
+            afkSteps--;
+            return;
+        }
+        if (--afkWait > 0) {
+            return;
+        }
+        // нова плавна зміна повороту: 8-14 тіків, невеликий кут
+        afkSteps = 8 + rnd.nextInt(7);
+        float yaw = (10 + rnd.nextInt(30)) * (rnd.nextBoolean() ? 1 : -1);
+        float pitch = (3 + rnd.nextInt(8)) * (rnd.nextBoolean() ? 1 : -1);
+        afkDYaw = yaw / afkSteps;
+        afkDPitch = pitch / afkSteps;
+        afkWait = 60 + rnd.nextInt(200);
+    }
+
     static int emptyRetries = 0;
 
     static void buildRound(MinecraftClient mc) {
@@ -464,6 +493,9 @@ public class AutoAh implements ClientModInitializer {
             if (!running || mc.player == null) {
                 return;
             }
+            if (cfg.antiAfk) {
+                antiAfkTick(mc);
+            }
             int n = STEPS_PER_TICK[spd() - 1];
             for (int k = 0; k < n && running; k++) {
                 Step s = queue.peek();
@@ -492,6 +524,7 @@ public class AutoAh implements ClientModInitializer {
         int myLotsSlot = 49;
         int speed = 2;
         boolean showSlots = true;
+        boolean antiAfk = true;
     }
 
     // ================================================================ кроки
@@ -891,6 +924,8 @@ public class AutoAh implements ClientModInitializer {
         ButtonWidget bSpeed;
         ButtonWidget[] tog = new ButtonWidget[9];
         ButtonWidget bShow;
+        ButtonWidget bAfk;
+        boolean afk;
         int mask;
         int speed;
         boolean show;
@@ -905,7 +940,7 @@ public class AutoAh implements ClientModInitializer {
         static final String[] LABELS = {
                 "Ціна", "Предметів у лоті", "Лотів за раунд", "Пауза до скасування (с)",
                 "Команда продажу", "Слот «Мої лоти»", "Швидкість роботи", "Предмети (слоти 1–9)",
-                "Номери слотів у /ah"
+                "Номери слотів у /ah", "Рух камери (анти-АФК)"
         };
 
         public CfgScreen(Screen parent) {
@@ -942,6 +977,10 @@ public class AutoAh implements ClientModInitializer {
             return SPEED_NAMES[this.speed - 1];
         }
 
+        String afkLabel() {
+            return this.afk ? "Увімкнено" : "Вимкнено";
+        }
+
         String showLabel() {
             return this.show ? "Увімкнено" : "Вимкнено";
         }
@@ -952,9 +991,10 @@ public class AutoAh implements ClientModInitializer {
             this.mask = slotMask();
             this.speed = Math.max(1, Math.min(MAX_SPEED, cfg.speed));
             this.show = cfg.showSlots;
+            this.afk = cfg.antiAfk;
 
-            this.rowH = Math.max(19, Math.min(22, (this.height - 112) / 9));
-            this.panelH = 98 + 9 * this.rowH;
+            this.rowH = Math.max(18, Math.min(22, (this.height - 112) / LABELS.length));
+            this.panelH = 98 + LABELS.length * this.rowH;
             this.top = Math.max(2, (this.height - this.panelH) / 2);
             this.y0 = this.top + 26;
 
@@ -981,8 +1021,14 @@ public class AutoAh implements ClientModInitializer {
                         b.setMessage(new LiteralText(showLabel()));
                     }));
 
+            this.bAfk = this.addButton(new ButtonWidget(ctrlX(), ctrlY(9), CTRL_W, CTRL_H,
+                    new LiteralText(afkLabel()), b -> {
+                        this.afk = !this.afk;
+                        b.setMessage(new LiteralText(afkLabel()));
+                    }));
+
             int cx = this.width / 2;
-            int y = this.y0 + 9 * this.rowH + 6;
+            int y = this.y0 + LABELS.length * this.rowH + 6;
             this.addButton(new ButtonWidget(cx - 155, y, 100, 20, new LiteralText("Зберегти"), b -> {
                 this.apply();
                 saveCfg();
@@ -1014,6 +1060,7 @@ public class AutoAh implements ClientModInitializer {
             cfg.slotMask = this.mask;
             cfg.hotbarSlot = Integer.numberOfTrailingZeros(this.mask) + 1;
             cfg.showSlots = this.show;
+            cfg.antiAfk = this.afk;
         }
 
         @Override
@@ -1071,7 +1118,7 @@ public class AutoAh implements ClientModInitializer {
                 this.textRenderer.draw(m, LABELS[i], left + 10, ry + (this.rowH - 8) / 2.0f, 0x404040);
             }
 
-            int sy = this.y0 + 9 * this.rowH + 32;
+            int sy = this.y0 + LABELS.length * this.rowH + 32;
             this.centered(m, running ? "Статус: ПРАЦЮЄ" : "Статус: ЗУПИНЕНО", cx, sy, running ? 0x00AA00 : 0xAA0000);
             this.centered(m, "З {count} у команді стак не ділиться.", cx, sy + 11, 0x555555);
             this.centered(m, "Без {count} — стак ділиться автоматично.", cx, sy + 22, 0x555555);
